@@ -1,0 +1,33 @@
+name: odt-clean
+channels:
+  - conda-forge
+dependencies:
+  - python=3.8.20
+  - numpy=1.24.4
+  - pillow
+  - pip
+  - typing_extensions
+  - pip:
+      # Core DL / RL stack
+      - torch==2.4.1
+      - torchvision==0.19.1
+      - gym==0.26.2
+      - gymnasium==1.1.1
+      - shimmy==2.0.0
+      - stable-baselines3==2.4.1
+      - einops==0.8.0
+      - transformers==4.46.3
+      - tqdm==4.67.1
+
+      # Datasets and Mujoco v4 env support
+      - just-d4rl==0.2407.5
+      - mujoco==3.2.3
+
+      # Logging / utilities / video
+      - tensorboard==2.20.0
+      - imageio==2.36.0
+      - imageio-ffmpeg==0.5.1
+      - cloudpickle==3.1.1
+      - jax-jumpy==1.0.0
+      - farama-notifications==0.0.4
+      - icecream==2.1.3
