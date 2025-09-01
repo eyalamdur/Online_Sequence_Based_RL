@@ -35,6 +35,20 @@ from evaluation import create_vec_eval_episodes_fn, vec_evaluate_episode_rtg
 from trainer import SequenceTrainer
 from logger import Logger
 
+# --- Colorize only the "DEBUG:" token in prints ---
+import builtins as _builtins
+_GREEN = "\033[32m"
+_RESET = "\033[0m"
+
+def _print_color_debug(*args, sep=" ", end="\n", file=None, flush=False):
+    def _c(x):
+        if isinstance(x, str):
+            return x.replace("DEBUG:", f"{_GREEN}DEBUG:{_RESET}")
+        return x
+    return _builtins.print(*[_c(a) for a in args], sep=sep, end=end, file=file, flush=flush)
+
+print = _print_color_debug
+
 # Disable TensorBoard for Apple Silicon compatibility
 TENSORBOARD_AVAILABLE = False
 SummaryWriter = None
@@ -194,7 +208,7 @@ class Experiment:
     def _load_model(self, path_prefix):
         if Path(f"{path_prefix}/model.pt").exists():
             with open(f"{path_prefix}/model.pt", "rb") as f:
-                checkpoint = torch.load(f)
+                checkpoint = torch.load(f, map_location=self.device)
             self.model.load_state_dict(checkpoint["model_state_dict"])
             self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
             self.scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
@@ -207,7 +221,9 @@ class Experiment:
             self.total_transitions_sampled = checkpoint["total_transitions_sampled"]
             np.random.set_state(checkpoint["np"])
             random.setstate(checkpoint["python"])
-            torch.set_rng_state(checkpoint["pytorch"])
+            state = checkpoint.get("pytorch")
+            if isinstance(state, torch.Tensor):
+                torch.set_rng_state(state.cpu())
             print(f"Model loaded at {path_prefix}/model.pt")
 
     def _load_dataset(self, env_name):
@@ -467,6 +483,11 @@ class Experiment:
             )
             print(f"DEBUG: Training iteration completed. Loss: {train_outputs.get('training/train_loss_mean', 'N/A')}")
             
+            # Save a checkpoint before evaluation if requested
+            if self.variant.get("save_before_eval", False):
+                print("DEBUG: Saving checkpoint before evaluation (pretrain)...")
+                self._save_model(path_prefix=self.logger.log_path, is_pretrain_model=True)
+
             print("DEBUG: Starting evaluation...")
             eval_outputs, eval_reward = self.evaluate(eval_fns)
             print(f"DEBUG: Evaluation completed. Reward: {eval_reward}")
@@ -503,6 +524,16 @@ class Experiment:
         print("DEBUG: Pretrain phase completed!")
 
     def evaluate(self, eval_fns):
+        
+        # Load a checkpoint for evaluation if available
+        ckpt_dir = self.variant.get("eval_ckpt_path") or self.variant.get("resume_path") or self.logger.log_path
+        ckpt_path = f"{ckpt_dir}/model.pt"
+        if os.path.exists(ckpt_path):
+            print(f"DEBUG: Loading checkpoint for evaluation from {ckpt_path}")
+            self._load_model(ckpt_dir)
+        else:
+            print(f"DEBUG: No checkpoint found at {ckpt_path}; evaluating current in-memory model.")
+
         eval_start = time.time()
         self.model.eval()
         outputs = {}
@@ -595,6 +626,11 @@ class Experiment:
             )
             outputs.update(train_outputs)
             print(f"DEBUG: Training iteration completed. Loss: {train_outputs.get('training/train_loss_mean', 'N/A')}")
+            
+            # Save a checkpoint before evaluation if requested
+            if evaluation and self.variant.get("save_before_eval", False):
+                print("DEBUG: Saving checkpoint before evaluation (online)...")
+                self._save_model(path_prefix=self.logger.log_path, is_pretrain_model=False)
 
             if evaluation:
                 print("DEBUG: Running evaluation...")
@@ -636,6 +672,11 @@ class Experiment:
 
         utils.set_seed_everywhere(args.seed)
         print(f"DEBUG: Seed set to {args.seed}")
+        
+        # Attempt to resume from checkpoint if provided
+        if self.variant.get("resume_path"):
+            print(f"DEBUG: Attempting to resume from {self.variant['resume_path']}")
+            self._load_model(self.variant["resume_path"])
 
         def loss_fn(
             a_hat_dist,
@@ -658,6 +699,23 @@ class Experiment:
         def get_env_builder(seed, env_name, target_goal=None):
             def make_env_fn():
                 env = gym.make(env_name)
+                
+                # normalize API so VecEnv always gets Gym-style outputs
+                orig_reset = env.reset
+                def _reset(*args, **kwargs):
+                    out = orig_reset(*args, **kwargs)
+                    return out[0] if isinstance(out, tuple) else out  # Gymnasium -> obs
+                env.reset = _reset
+
+                orig_step = env.step
+                def _step(action):
+                    out = orig_step(action)
+                    if isinstance(out, tuple) and len(out) == 5:  # Gymnasium: (obs, reward, terminated, truncated, info)
+                        obs, reward, terminated, truncated, info = out
+                        return obs, reward, bool(terminated or truncated), info  # convert to Gym's (obs, reward, done, info)
+                    return out  # already Gym-style
+                env.step = _step
+        
                 # Handle both old gym and new gymnasium APIs
                 if hasattr(env, 'seed'):
                     env.seed(seed)
@@ -805,6 +863,12 @@ if __name__ == "__main__":
     parser.add_argument("--save_video", action="store_true", help="Save videos instead of real-time rendering")
     parser.add_argument("--video_episodes", type=int, default=1, help="Number of video episodes to save")
 
+    parser.add_argument("--save_before_eval", action="store_true",
+                        help="Save a checkpoint immediately before each evaluation step.")
+    parser.add_argument("--resume_path", type=str, default="",
+                        help="Directory containing model.pt to load at startup (resume).")
+    parser.add_argument("--eval_ckpt_path", type=str, default="",
+                        help="Directory containing model.pt to load just before evaluation (overrides resume_path).")
 
 
     args = parser.parse_args()
